@@ -5,7 +5,7 @@ export class SharedResourcesStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const projectName = "decouple-services";
+    const projectName = "fundares";
 
     // Apply stack-level tags
     cdk.Tags.of(this).add("Project", projectName);

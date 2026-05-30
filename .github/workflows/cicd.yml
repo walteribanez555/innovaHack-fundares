@@ -19,7 +19,7 @@ env:
   AWS_DEFAULT_REGION: us-east-1
   NODE_VERSION: "22"
   ENVIRONMENT: prod
-  STACK_NAME: DecoupleServicesStack-Prod
+  STACK_NAME: FundaresStack-Prod
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ jobs:
           CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
           LOG_LEVEL:    ${{ secrets.LOG_LEVEL }}
         run: |
-          SECRET_NAME="decouple-services/prod/app"
+          SECRET_NAME="fundares/prod/app"
           SECRET_JSON=$(jq -n \
             --arg cors "$CORS_ORIGINS" \
             --arg log  "$LOG_LEVEL" \
@@ -188,13 +188,13 @@ jobs:
           AWS_ACCOUNT_ID: ${{ secrets.aws_account }}
         run: |
           STATUS=$(aws cloudformation describe-stacks \
-            --stack-name DecoupleServicesSharedStack \
+            --stack-name FundaresSharedStack \
             --query 'Stacks[0].StackStatus' --output text 2>/dev/null \
             || echo "DOES_NOT_EXIST")
 
           if [[ "$STATUS" == "DOES_NOT_EXIST" ]]; then
             echo "Shared stack missing — deploying..."
-            npx cdk deploy DecoupleServicesSharedStack --require-approval never
+            npx cdk deploy FundaresSharedStack --require-approval never
           elif [[ "$STATUS" == *ROLLBACK* || "$STATUS" == *FAILED* ]]; then
             echo "❌ Shared stack in '$STATUS' — manual intervention required."
             exit 1
@@ -261,7 +261,7 @@ jobs:
 
       - name: Deploy to AWS Lambda
         run: |
-          FUNCTION_NAME="decouple-services-prod-function"
+          FUNCTION_NAME="fundares-prod-function"
           RETRY_COUNT=5
           RETRY_INTERVAL=10
 
