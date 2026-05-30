@@ -1,56 +1,33 @@
-# Fundares Extraction Service — Frontend Integration Guide
+# Fundares — Next.js Integration Guide
 
-How to call the AI extraction service from any frontend (web, React Native, Flutter).
+The extraction service is called **server-side only** through Next.js Route Handlers. The external API URL is never exposed to the browser.
 
-Base URL: `https://<api-gateway-id>.execute-api.us-east-1.amazonaws.com`
-
-> The exact URL is available in the CloudFormation stack output `ApiEndpoint` after deployment.
+```bash
+# .env.local
+API_URL=https://<api-gateway-id>.execute-api.us-east-1.amazonaws.com/api/v1
+```
 
 ---
 
-## Flows
-
-### Text message (simplest)
-```
-POST /api/v1/extract/text  →  ExtractionResult
-```
-
-### Image or video
-```
-POST /api/v1/extract/presign  →  { sessionId, uploadUrl }
-PUT  <uploadUrl>              →  (direct S3 upload, no Lambda hop)
-POST /api/v1/extract/media    →  ExtractionResult
-```
-
-Media is uploaded **directly to S3** using a presigned URL — it never passes through the Lambda. This removes file-size limits and reduces latency.
-
----
-
-## TypeScript / JavaScript
-
-### Types
+## Types
 
 ```typescript
-interface PresignResponse {
-  sessionId: string;
-  uploadUrl: string;
-  expiresIn: number;        // seconds (default 300)
-}
+// lib/extraction.types.ts
 
-interface Material {
-  type: string;             // e.g. "cardboard", "PET plastic", "glass"
+export interface Material {
+  type: string;
   quantity: number | null;
   unit: 'kg' | 'unit' | null;
 }
 
-interface ExtractionData {
+export interface ExtractionData {
   company: string | null;
-  date: string | null;      // YYYY-MM-DD
+  date: string | null;       // YYYY-MM-DD
   materials: Material[];
   notes: string | null;
 }
 
-interface ExtractionResult {
+export interface ExtractionResult {
   sessionId: string;
   inputType: 'text' | 'image' | 'video';
   confidence: 'high' | 'medium' | 'low';
@@ -59,350 +36,410 @@ interface ExtractionResult {
 }
 ```
 
-### Extract from text
+---
+
+## Route Handlers
+
+### Text — `app/api/extract/text/route.ts`
 
 ```typescript
-const BASE = 'https://<api-id>.execute-api.us-east-1.amazonaws.com/api/v1';
+import { NextRequest, NextResponse } from 'next/server';
 
-async function extractFromText(message: string): Promise<ExtractionResult> {
-  const res = await fetch(`${BASE}/extract/text`, {
+export async function POST(req: NextRequest) {
+  const { message } = await req.json();
+
+  if (!message) {
+    return NextResponse.json({ error: 'message is required' }, { status: 400 });
+  }
+
+  const res = await fetch(`${process.env.API_URL}/extract/text`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
   });
 
-  if (!res.ok && res.status !== 422) {
-    throw new Error(`Extraction failed: ${await res.text()}`);
-  }
-
-  const { data } = await res.json();
-  return data;
+  const data = await res.json();
+  return NextResponse.json(data, { status: res.status });
 }
-
-// Usage
-const result = await extractFromText(
-  'Today I collected 35 kg of cardboard and 20 PET bottles at Industrias Bisa'
-);
-
-if (result.confidence === 'low') {
-  console.warn('Low confidence:', result.rejectedReasons);
-} else {
-  console.log(result.extracted?.materials);
-}
-```
-
-### Extract from image or video
-
-```typescript
-async function presign(mimeType: string): Promise<PresignResponse> {
-  const res = await fetch(`${BASE}/extract/presign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mimeType }),
-  });
-  if (!res.ok) throw new Error(`Presign failed: ${await res.text()}`);
-  const { data } = await res.json();
-  return data;
-}
-
-async function uploadToS3(uploadUrl: string, file: File): Promise<void> {
-  const res = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: { 'Content-Type': file.type },
-    body: file,
-  });
-  if (!res.ok) throw new Error(`S3 upload failed: ${res.status}`);
-}
-
-async function extractFromMedia(
-  sessionId: string,
-  type: 'image' | 'video',
-): Promise<ExtractionResult> {
-  const res = await fetch(`${BASE}/extract/media`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, type }),
-  });
-  if (!res.ok && res.status !== 422) {
-    throw new Error(`Media extraction failed: ${await res.text()}`);
-  }
-  const { data } = await res.json();
-  return data;
-}
-
-// Full flow
-async function extractFromFile(file: File): Promise<ExtractionResult> {
-  const type = file.type.startsWith('video/') ? 'video' : 'image';
-  const { sessionId, uploadUrl } = await presign(file.type);
-  await uploadToS3(uploadUrl, file);
-  return extractFromMedia(sessionId, type);
-}
-
-// Usage
-const fileInput = document.querySelector<HTMLInputElement>('#file-input')!;
-fileInput.addEventListener('change', async () => {
-  const file = fileInput.files?.[0];
-  if (!file) return;
-
-  const result = await extractFromFile(file);
-  console.log(result);
-});
 ```
 
 ---
 
-## React / React Native (Expo)
+### Presign — `app/api/extract/presign/route.ts`
 
-### Text message
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function POST(req: NextRequest) {
+  const { mimeType } = await req.json();
+
+  if (!mimeType) {
+    return NextResponse.json({ error: 'mimeType is required' }, { status: 400 });
+  }
+
+  const res = await fetch(`${process.env.API_URL}/extract/presign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mimeType }),
+  });
+
+  const data = await res.json();
+  return NextResponse.json(data, { status: res.status });
+}
+```
+
+---
+
+### Media — `app/api/extract/media/route.ts`
+
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function POST(req: NextRequest) {
+  const { sessionId, type } = await req.json();
+
+  if (!sessionId || !type) {
+    return NextResponse.json({ error: 'sessionId and type are required' }, { status: 400 });
+  }
+
+  const res = await fetch(`${process.env.API_URL}/extract/media`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, type }),
+  });
+
+  const data = await res.json();
+  return NextResponse.json(data, { status: res.status });
+}
+```
+
+---
+
+## Client API helper
+
+All components call `/api/extract/*` — the local Next.js routes, not the external API.
+
+```typescript
+// lib/extraction.client.ts
+
+import type { ExtractionResult } from './extraction.types';
+
+export async function extractFromText(message: string): Promise<ExtractionResult> {
+  const res = await fetch('/api/extract/text', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+
+  if (!res.ok && res.status !== 422) throw new Error(await res.text());
+  const { data } = await res.json();
+  return data;
+}
+
+export async function extractFromFile(file: File): Promise<ExtractionResult> {
+  const type = file.type.startsWith('video/') ? 'video' : 'image';
+
+  // 1. Presign (through route handler)
+  const presignRes = await fetch('/api/extract/presign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mimeType: file.type }),
+  });
+  if (!presignRes.ok) throw new Error(await presignRes.text());
+  const { data: presign } = await presignRes.json();
+
+  // 2. Upload directly to S3 (presigned URL — no server hop)
+  const uploadRes = await fetch(presign.uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': file.type },
+    body: file,
+  });
+  if (!uploadRes.ok) throw new Error(`S3 upload failed: ${uploadRes.status}`);
+
+  // 3. Extract (through route handler)
+  const extractRes = await fetch('/api/extract/media', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: presign.sessionId, type }),
+  });
+  if (!extractRes.ok && extractRes.status !== 422) throw new Error(await extractRes.text());
+  const { data } = await extractRes.json();
+  return data;
+}
+```
+
+> The S3 PUT still goes **directly from the browser** to S3 using the presigned URL — routing a video through the server would be unnecessarily slow.
+
+---
+
+## Flow 1 — Text message
 
 ```tsx
+// app/extract/text/page.tsx
+'use client';
+
 import { useState } from 'react';
+import { extractFromText } from '@/lib/extraction.client';
+import { ExtractionOutput } from '@/components/ExtractionOutput';
+import type { ExtractionResult } from '@/lib/extraction.types';
 
-const BASE = 'https://<api-id>.execute-api.us-east-1.amazonaws.com/api/v1';
-
-function TextExtractor() {
+export default function TextExtractPage() {
   const [message, setMessage] = useState('');
-  const [result, setResult] = useState<ExtractionResult | null>(null);
+  const [result, setResult]   = useState<ExtractionResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState<string | null>(null);
 
-  async function handleSubmit() {
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setLoading(true);
+    setError(null);
+    setResult(null);
+
     try {
-      const res = await fetch(`${BASE}/extract/text`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
-      });
-      const { data } = await res.json();
-      setResult(data);
+      setResult(await extractFromText(message));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <>
-      <textarea value={message} onChange={e => setMessage(e.target.value)} />
-      <button onClick={handleSubmit} disabled={loading}>
-        {loading ? 'Extracting...' : 'Extract'}
-      </button>
-      {result && (
-        <pre>{JSON.stringify(result.extracted, null, 2)}</pre>
-      )}
-    </>
+    <main className="max-w-xl mx-auto p-6 space-y-4">
+      <h1 className="text-xl font-semibold">Extract from text</h1>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <textarea
+          className="w-full border rounded p-2 h-32 text-sm"
+          placeholder="Paste the collector's WhatsApp message…"
+          value={message}
+          onChange={e => setMessage(e.target.value)}
+          required
+        />
+        <button
+          type="submit"
+          disabled={loading || !message.trim()}
+          className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
+        >
+          {loading ? 'Extracting…' : 'Extract'}
+        </button>
+      </form>
+      {error  && <p className="text-red-600 text-sm">{error}</p>}
+      {result && <ExtractionOutput result={result} />}
+    </main>
   );
-}
-```
-
-### Image upload (Expo)
-
-```typescript
-import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
-
-const BASE = 'https://<api-id>.execute-api.us-east-1.amazonaws.com/api/v1';
-
-async function pickAndExtract(): Promise<ExtractionResult> {
-  const picked = await ImagePicker.launchImageLibraryAsync({
-    mediaTypes: ImagePicker.MediaTypeOptions.All,  // images + videos
-    quality: 0.9,
-  });
-
-  if (picked.canceled) throw new Error('Cancelled');
-
-  const asset    = picked.assets[0];
-  const mimeType = asset.mimeType ?? 'image/jpeg';
-  const type     = mimeType.startsWith('video/') ? 'video' : 'image';
-
-  // 1. Get presigned URL
-  const presignRes  = await fetch(`${BASE}/extract/presign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mimeType }),
-  });
-  const { data: presign } = await presignRes.json();
-
-  // 2. Upload directly to S3
-  await FileSystem.uploadAsync(presign.uploadUrl, asset.uri, {
-    httpMethod: 'PUT',
-    headers: { 'Content-Type': mimeType },
-    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-  });
-
-  // 3. Extract
-  const extractRes = await fetch(`${BASE}/extract/media`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: presign.sessionId, type }),
-  });
-  const { data } = await extractRes.json();
-  return data;
 }
 ```
 
 ---
 
-## Flutter / Dart
+## Flow 2 — Image
 
-```dart
-import 'dart:io';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
+```tsx
+// app/extract/image/page.tsx
+'use client';
 
-const _base = 'https://<api-id>.execute-api.us-east-1.amazonaws.com/api/v1';
+import { useState, useRef } from 'react';
+import { extractFromFile } from '@/lib/extraction.client';
+import { ExtractionOutput } from '@/components/ExtractionOutput';
+import type { ExtractionResult } from '@/lib/extraction.types';
 
-class ExtractionClient {
-  // ── Text ──────────────────────────────────────────────────────────────────
-  Future<Map<String, dynamic>> extractText(String message) async {
-    final res = await http.post(
-      Uri.parse('$_base/extract/text'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'message': message}),
-    );
-    _assertOk(res, [200, 422]);
-    return (jsonDecode(res.body) as Map<String, dynamic>)['data'];
+export default function ImageExtractPage() {
+  const inputRef              = useRef<HTMLInputElement>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [result, setResult]   = useState<ExtractionResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState<string | null>(null);
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPreview(URL.createObjectURL(file));
+    setResult(null);
+    setError(null);
   }
 
-  // ── Image / Video ─────────────────────────────────────────────────────────
-  Future<Map<String, dynamic>> extractMedia(File file) async {
-    final mimeType = _mimeType(file.path);
-    final type     = mimeType.startsWith('video/') ? 'video' : 'image';
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const file = inputRef.current?.files?.[0];
+    if (!file) return;
 
-    // 1. Presign
-    final presignRes = await http.post(
-      Uri.parse('$_base/extract/presign'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'mimeType': mimeType}),
-    );
-    _assertOk(presignRes, [200]);
-    final presign = (jsonDecode(presignRes.body))['data'] as Map<String, dynamic>;
-
-    // 2. Upload to S3
-    final uploadRes = await http.put(
-      Uri.parse(presign['uploadUrl'] as String),
-      headers: {'Content-Type': mimeType},
-      body: await file.readAsBytes(),
-    );
-    _assertOk(uploadRes, [200]);
-
-    // 3. Extract
-    final extractRes = await http.post(
-      Uri.parse('$_base/extract/media'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'sessionId': presign['sessionId'], 'type': type}),
-    );
-    _assertOk(extractRes, [200, 422]);
-    return (jsonDecode(extractRes.body) as Map<String, dynamic>)['data'];
-  }
-
-  void _assertOk(http.Response res, List<int> allowed) {
-    if (!allowed.contains(res.statusCode)) {
-      throw Exception('HTTP ${res.statusCode}: ${res.body}');
+    setLoading(true);
+    setError(null);
+    try {
+      setResult(await extractFromFile(file));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setLoading(false);
     }
   }
 
-  String _mimeType(String path) {
-    if (path.endsWith('.png'))  return 'image/png';
-    if (path.endsWith('.webp')) return 'image/webp';
-    if (path.endsWith('.mp4'))  return 'video/mp4';
-    if (path.endsWith('.mov'))  return 'video/mov';
-    return 'image/jpeg';
-  }
-}
-
-// Usage
-void main() async {
-  final client = ExtractionClient();
-
-  // Text
-  final textResult = await client.extractText(
-    'Today I collected 35 kg of cardboard at Industrias Bisa',
+  return (
+    <main className="max-w-xl mx-auto p-6 space-y-4">
+      <h1 className="text-xl font-semibold">Extract from image</h1>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          onChange={handleFileChange}
+          className="block text-sm"
+        />
+        {preview && (
+          <img src={preview} alt="Preview" className="rounded border max-h-48 object-contain" />
+        )}
+        <button
+          type="submit"
+          disabled={loading || !preview}
+          className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
+        >
+          {loading ? 'Uploading & extracting…' : 'Extract'}
+        </button>
+      </form>
+      {error  && <p className="text-red-600 text-sm">{error}</p>}
+      {result && <ExtractionOutput result={result} />}
+    </main>
   );
-  print(textResult['extracted']);
-
-  // Image
-  final imageResult = await client.extractMedia(File('/path/to/photo.jpg'));
-  print(imageResult['confidence']);
 }
 ```
 
 ---
 
-## cURL (manual testing)
+## Flow 3 — Video
 
-### Text
+```tsx
+// app/extract/video/page.tsx
+'use client';
 
-```bash
-BASE="https://<api-id>.execute-api.us-east-1.amazonaws.com/api/v1"
+import { useState, useRef } from 'react';
+import { extractFromFile } from '@/lib/extraction.client';
+import { ExtractionOutput } from '@/components/ExtractionOutput';
+import type { ExtractionResult } from '@/lib/extraction.types';
 
-curl -s -X POST "$BASE/extract/text" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"Today I collected 35 kg of cardboard at Industrias Bisa"}' | jq .
-```
+export default function VideoExtractPage() {
+  const inputRef                = useRef<HTMLInputElement>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [result, setResult]     = useState<ExtractionResult | null>(null);
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState<string | null>(null);
 
-### Image
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name);
+    setResult(null);
+    setError(null);
+  }
 
-```bash
-# 1. Get presigned URL
-PRESIGN=$(curl -s -X POST "$BASE/extract/presign" \
-  -H "Content-Type: application/json" \
-  -d '{"mimeType":"image/jpeg"}')
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const file = inputRef.current?.files?.[0];
+    if (!file) return;
 
-SESSION_ID=$(echo $PRESIGN | jq -r '.data.sessionId')
-UPLOAD_URL=$(echo $PRESIGN | jq -r '.data.uploadUrl')
+    setLoading(true);
+    setError(null);
+    try {
+      setResult(await extractFromFile(file));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setLoading(false);
+    }
+  }
 
-# 2. Upload to S3
-curl -s -X PUT "$UPLOAD_URL" \
-  -H "Content-Type: image/jpeg" \
-  --data-binary @/path/to/photo.jpg
-
-# 3. Extract
-curl -s -X POST "$BASE/extract/media" \
-  -H "Content-Type: application/json" \
-  -d "{\"sessionId\":\"$SESSION_ID\",\"type\":\"image\"}" | jq .
-```
-
-### Video
-
-```bash
-PRESIGN=$(curl -s -X POST "$BASE/extract/presign" \
-  -H "Content-Type: application/json" \
-  -d '{"mimeType":"video/mp4"}')
-
-SESSION_ID=$(echo $PRESIGN | jq -r '.data.sessionId')
-UPLOAD_URL=$(echo $PRESIGN | jq -r '.data.uploadUrl')
-
-curl -s -X PUT "$UPLOAD_URL" \
-  -H "Content-Type: video/mp4" \
-  --data-binary @/path/to/video.mp4
-
-curl -s -X POST "$BASE/extract/media" \
-  -H "Content-Type: application/json" \
-  -d "{\"sessionId\":\"$SESSION_ID\",\"type\":\"video\"}" | jq .
+  return (
+    <main className="max-w-xl mx-auto p-6 space-y-4">
+      <h1 className="text-xl font-semibold">Extract from video</h1>
+      <p className="text-sm text-gray-500">Max 2 minutes · MP4, MOV, AVI, MKV</p>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <input
+          ref={inputRef}
+          type="file"
+          accept="video/mp4,video/mov,video/avi,video/mkv"
+          onChange={handleFileChange}
+          className="block text-sm"
+        />
+        {fileName && <p className="text-sm text-gray-600">Selected: {fileName}</p>}
+        <button
+          type="submit"
+          disabled={loading || !fileName}
+          className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
+        >
+          {loading ? 'Uploading & extracting…' : 'Extract'}
+        </button>
+      </form>
+      {error  && <p className="text-red-600 text-sm">{error}</p>}
+      {result && <ExtractionOutput result={result} />}
+    </main>
+  );
+}
 ```
 
 ---
 
-## Handling the result
+## Shared result component
 
-```typescript
-const result: ExtractionResult = await extractFromText(message);
+```tsx
+// components/ExtractionOutput.tsx
+import type { ExtractionResult } from '@/lib/extraction.types';
 
-switch (result.confidence) {
-  case 'high':
-    // All fields present and unambiguous — safe to save
-    saveToDatabase(result.extracted!);
-    break;
+const badge: Record<string, string> = {
+  high:   'bg-green-100 text-green-700',
+  medium: 'bg-yellow-100 text-yellow-700',
+  low:    'bg-red-100 text-red-700',
+};
 
-  case 'medium':
-    // Partial data — show to user for review before saving
-    showReviewScreen(result.extracted!);
-    break;
+export function ExtractionOutput({ result }: { result: ExtractionResult }) {
+  if (!result.extracted || result.confidence === 'low') {
+    return (
+      <div className="border border-red-300 rounded p-4 space-y-2">
+        <p className="font-medium text-red-600">Could not extract data</p>
+        <ul className="text-sm text-gray-600 list-disc pl-4">
+          {result.rejectedReasons?.map(r => <li key={r}>{r}</li>)}
+        </ul>
+      </div>
+    );
+  }
 
-  case 'low':
-    // Not enough data — ask the collector to resend
-    showRetryPrompt(result.rejectedReasons ?? []);
-    break;
+  const d = result.extracted;
+
+  return (
+    <div className="border rounded p-4 space-y-3 text-sm">
+      <div className="flex justify-between items-center">
+        <span className="font-medium">Extraction result</span>
+        <span className={`text-xs px-2 py-0.5 rounded-full capitalize font-medium ${badge[result.confidence]}`}>
+          {result.confidence} confidence
+        </span>
+      </div>
+
+      <dl className="grid grid-cols-2 gap-1">
+        <dt className="text-gray-500">Company</dt><dd>{d.company ?? '—'}</dd>
+        <dt className="text-gray-500">Date</dt>   <dd>{d.date    ?? '—'}</dd>
+        {d.notes && <><dt className="text-gray-500">Notes</dt><dd>{d.notes}</dd></>}
+      </dl>
+
+      {d.materials.length > 0 && (
+        <table className="w-full border-t pt-2 text-sm">
+          <thead>
+            <tr className="text-gray-500 text-left">
+              <th className="font-normal">Material</th>
+              <th className="font-normal">Qty</th>
+              <th className="font-normal">Unit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {d.materials.map((m, i) => (
+              <tr key={i}>
+                <td>{m.type}</td>
+                <td>{m.quantity ?? '—'}</td>
+                <td>{m.unit    ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
 }
 ```
 
@@ -412,8 +449,8 @@ switch (result.confidence) {
 
 | Mistake | Fix |
 |---|---|
-| Sending wrong `Content-Type` to S3 | Must match the `mimeType` sent in `/presign` exactly — S3 returns `403` otherwise |
-| Reusing a `sessionId` | Sessions are single-use — S3 object is deleted after `/extract/media` |
-| Waiting more than 5 min to upload | Call `/presign` again to get a fresh URL |
-| Treating `422` as a network error | `422` is a valid structured response — parse it the same as `200` |
-| Video larger than 2 min | Nova 2 Lite rejects videos over 2 minutes — trim before uploading |
+| `API_URL` undefined at runtime | Confirm it's in `.env.local` (no `NEXT_PUBLIC_` prefix needed) |
+| Wrong `Content-Type` on S3 PUT | `extractFromFile` passes `file.type` automatically — don't override |
+| Treating `422` as a fetch error | `422` is a valid structured response — the client handles it already |
+| Video over 2 minutes | Nova 2 Lite rejects it — trim before uploading |
+| Reusing a `sessionId` | Single-use — the S3 object is deleted after `/extract/media` |
