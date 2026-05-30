@@ -29,7 +29,7 @@ jobs:
     outputs:
       target_sha: ${{ steps.validate.outputs.target_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -82,12 +82,12 @@ jobs:
     outputs:
       api_url: ${{ steps.endpoint.outputs.url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_version }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -118,7 +118,7 @@ jobs:
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "🔄 Rollback API endpoint: $URL"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
