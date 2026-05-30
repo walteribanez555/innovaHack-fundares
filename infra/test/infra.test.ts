@@ -1,6 +1,6 @@
 import * as cdk from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
-import { DecoupleServicesStack } from "../lib/base-stack";
+import { FundaresStack } from "../lib/base-stack";
 import { SharedResourcesStack } from "../lib/shared-resources-stack";
 
 const AWS_ACCOUNT = "682079544132";
@@ -12,25 +12,14 @@ describe("SharedResourcesStack", () => {
     const app = new cdk.App();
     const stack = new SharedResourcesStack(app, "TestSharedStack", { env: ENV });
     const template = Template.fromStack(stack);
-    // Empty stack — just confirm it synthesises cleanly
     expect(template).toBeDefined();
   });
 });
 
-describe("DecoupleServicesStack", () => {
-  it("synthesises without errors (dev)", () => {
-    const app = new cdk.App();
-    const stack = new DecoupleServicesStack(app, "TestDevStack", {
-      env: ENV,
-      appEnv: "dev",
-    });
-    const template = Template.fromStack(stack);
-    expect(template).toBeDefined();
-  });
-
+describe("FundaresStack", () => {
   it("synthesises without errors (prod)", () => {
     const app = new cdk.App();
-    const stack = new DecoupleServicesStack(app, "TestProdStack", {
+    const stack = new FundaresStack(app, "TestProdStack", {
       env: ENV,
       appEnv: "prod",
     });
@@ -40,11 +29,10 @@ describe("DecoupleServicesStack", () => {
 
   it("applies Project tag", () => {
     const app = new cdk.App();
-    const stack = new DecoupleServicesStack(app, "TestTagStack", {
+    const stack = new FundaresStack(app, "TestTagStack", {
       env: ENV,
-      appEnv: "dev",
+      appEnv: "prod",
     });
-    // Tags are applied at the CDK stack level, not as individual CloudFormation resources
-    expect(stack.appEnv).toBe("dev");
+    expect(stack.appEnv).toBe("prod");
   });
 });

@@ -11,7 +11,7 @@ import * as path from "path";
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
-export interface DecoupleServicesStackProps extends cdk.StackProps {
+export interface FundaresStackProps extends cdk.StackProps {
   /**
    * Application environment: "dev" | "prod".
    * Named `appEnv` (not `environment`) to avoid shadowing the built-in
@@ -21,7 +21,7 @@ export interface DecoupleServicesStackProps extends cdk.StackProps {
 
   /**
    * Logical service name used for all resource names.
-   * Defaults to `decouple-services-{appEnv}`.
+   * Defaults to `fundares-{appEnv}`.
    */
   serviceName?: string;
 
@@ -34,7 +34,7 @@ export interface DecoupleServicesStackProps extends cdk.StackProps {
 
   /**
    * Extra (non-sensitive) environment variables injected into the Lambda.
-   * Sensitive values (DATABASE_URL, etc.) are stored in AWS Secrets Manager
+   * Sensitive values are stored in AWS Secrets Manager
    * and fetched by the Lambda at cold start via APP_SECRET_ARN.
    */
   lambdaEnvironmentVariables?: Record<string, string>;
@@ -42,7 +42,7 @@ export interface DecoupleServicesStackProps extends cdk.StackProps {
 
 // ─── Stack ────────────────────────────────────────────────────────────────────
 
-export class DecoupleServicesStack extends cdk.Stack {
+export class FundaresStack extends cdk.Stack {
   /** Application environment ("dev" | "prod"). */
   public readonly appEnv: string;
   /** The HTTP API (ApiGatewayV2). */
@@ -50,12 +50,12 @@ export class DecoupleServicesStack extends cdk.Stack {
   /** The Lambda function that handles all routes. */
   public readonly lambdaFn: lambdaNodejs.NodejsFunction;
 
-  constructor(scope: Construct, id: string, props: DecoupleServicesStackProps) {
+  constructor(scope: Construct, id: string, props: FundaresStackProps) {
     super(scope, id, props);
 
     this.appEnv = props.appEnv;
 
-    const projectName = "decouple-services";
+    const projectName = "fundares";
     const serviceName = props.serviceName ?? `${projectName}-${this.appEnv}`;
     const apiGwLogRetention = props.apiGwLogRetentionDays ?? logs.RetentionDays.ONE_WEEK;
     const isProd = this.appEnv === "prod";
@@ -67,7 +67,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // IAM  –  Lambda execution role
-    // Terraform: aws_iam_role.lambda_exec + aws_iam_role_policy_attachment
     // ─────────────────────────────────────────────────────────────────────────
     const lambdaRole = new iam.Role(this, "LambdaExecRole", {
       roleName: `${serviceName}-lambda-exec-role`,
@@ -81,7 +80,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // CloudWatch log group  –  Lambda logs
-    // Terraform: aws_cloudwatch_log_group.lambda_log (retention_in_days = 7)
     // ─────────────────────────────────────────────────────────────────────────
     const lambdaLogGroup = new logs.LogGroup(this, "LambdaLogGroup", {
       logGroupName: `/aws/lambda/${serviceName}-function`,
@@ -92,31 +90,17 @@ export class DecoupleServicesStack extends cdk.Stack {
     // ─────────────────────────────────────────────────────────────────────────
     // AWS Secrets Manager — app configuration secret
     //
-    // The secret is created and populated by the CI/CD pipeline BEFORE this
-    // stack is deployed, so the real values are always available when
-    // CloudFormation resolves the dynamic references below.
-    //
-    // Secret name convention: decouple-services/{env}/app
-    // Keys: DATABASE_URL, CORS_ORIGINS, LOG_LEVEL
-    //
-    // CDK does NOT own the lifecycle of this secret — managing it externally
-    // prevents a chicken-and-egg problem where placeholders would be resolved
-    // into the Lambda configuration on first deploy.
+    // Secret name convention: fundares/{env}/app
+    // Keys: CORS_ORIGINS, LOG_LEVEL
     // ─────────────────────────────────────────────────────────────────────────
     const appSecret = secretsmanager.Secret.fromSecretNameV2(
-      this, "AppSecret", `decouple-services/${this.appEnv}/app`
+      this, "AppSecret", `fundares/${this.appEnv}/app`
     );
 
-    // Grant the Lambda execution role runtime read access (useful for future
-    // rotation logic or manual secret refresh without a redeployment).
     appSecret.grantRead(lambdaRole);
 
     // ─────────────────────────────────────────────────────────────────────────
     // S3 bucket  —  temporary ID document storage for age verification
-    //
-    // Images are uploaded before the Bedrock call and deleted in a `finally`
-    // block.  The 2-day lifecycle rule acts as a safety net in case a Lambda
-    // timeout prevents the explicit deletion from running.
     // ─────────────────────────────────────────────────────────────────────────
     const verificationBucket = new s3.Bucket(this, "VerificationBucket", {
       bucketName: `${serviceName}-verification`,
@@ -128,10 +112,8 @@ export class DecoupleServicesStack extends cdk.Stack {
           enabled: true,
         },
       ],
-      // Never retain raw ID images beyond the stack lifetime.
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
-      // Block all public access — images are only accessed by the Lambda role.
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
     });
@@ -139,22 +121,17 @@ export class DecoupleServicesStack extends cdk.Stack {
     verificationBucket.grantReadWrite(lambdaRole);
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Bedrock  —  allow Lambda to invoke Claude Sonnet for document analysis
+    // Bedrock  —  allow Lambda to invoke Claude / Nova for document analysis
     // ─────────────────────────────────────────────────────────────────────────
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
         sid: "AllowBedrockInvokeModel",
         actions: ["bedrock:InvokeModel"],
-        // Cross-region inference profiles require two resource patterns:
-        //   1. The inference profile ARN (account-scoped, any region for routing)
-        //   2. The underlying foundation model ARN (no account, wildcard region)
         resources: [
-          // Claude Haiku 4.5 (active) + Sonnet 4.5/4.6 (fallback / future)
           `arn:aws:bedrock:*:${this.account}:inference-profile/us.anthropic.claude-haiku-4*`,
           `arn:aws:bedrock:*:${this.account}:inference-profile/us.anthropic.claude-sonnet-4*`,
           `arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4*`,
           `arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4*`,
-          // Amazon Nova Lite / Pro (on-demand, no inference profile)
           `arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0`,
           `arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0`,
         ],
@@ -175,15 +152,10 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // Lambda function
-    // Terraform: aws_lambda_function.app
-    //   runtime  = nodejs22.x
-    //   handler  = index.handler  (src/index.ts exports `handler`)
-    //   source   = apps/identification/src/index.ts  (bundled via esbuild)
-    //   timeout  = 10 s  |  memory = 512 MB
     // ─────────────────────────────────────────────────────────────────────────
     this.lambdaFn = new lambdaNodejs.NodejsFunction(this, "AppFunction", {
       functionName: `${serviceName}-function`,
-      description: "Offer, demand service",
+      description: "Fundares identification service",
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, "../../apps/identification/src/index.ts"),
       handler: "handler",
@@ -191,25 +163,15 @@ export class DecoupleServicesStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       memorySize: 512,
       environment: {
-        // Non-sensitive config injected directly.
         NODE_ENV: isProd ? "production" : "development",
-        // Sensitive values — CloudFormation resolves these from Secrets Manager
-        // at deploy time using dynamic references. They become normal env vars
-        // inside the Lambda container (process.env.DATABASE_URL etc.).
-        // The CI/CD pipeline populates the secret BEFORE this stack is deployed
-        // so CloudFormation always resolves real values, never placeholders.
-        DATABASE_URL: appSecret.secretValueFromJson("DATABASE_URL").unsafeUnwrap(),
         CORS_ORIGINS: appSecret.secretValueFromJson("CORS_ORIGINS").unsafeUnwrap(),
         LOG_LEVEL:    appSecret.secretValueFromJson("LOG_LEVEL").unsafeUnwrap(),
-        // ── Age-verification ────────────────────────────────────────────────
         S3_VERIFICATION_BUCKET: verificationBucket.bucketName,
         BEDROCK_MODEL_ID: "amazon.nova-lite-v1:0",
         CONFIDENCE_THRESHOLD: "0.85",
-        // Caller can pass extra non-sensitive vars (e.g. feature flags).
         ...props.lambdaEnvironmentVariables,
       },
       logGroup: lambdaLogGroup,
-      // Mirrors apps/identification/esbuild.config.js
       bundling: {
         minify: isProd,
         sourceMap: !isProd,
@@ -223,7 +185,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // HTTP API  (ApiGatewayV2)
-    // Terraform: aws_apigatewayv2_api.api
     // ─────────────────────────────────────────────────────────────────────────
     this.httpApi = new apigatewayv2.CfnApi(this, "HttpApi", {
       name: serviceName,
@@ -246,7 +207,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // CloudWatch log group  –  API Gateway access logs
-    // Terraform: aws_cloudwatch_log_group.api_gw
     // ─────────────────────────────────────────────────────────────────────────
     const apiGwLogGroup = new logs.LogGroup(this, "ApiGwLogGroup", {
       logGroupName: `/aws/api_gw/${serviceName}-api`,
@@ -256,7 +216,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // API Gateway stage  –  $default (auto-deploy)
-    // Terraform: aws_apigatewayv2_stage.base
     // ─────────────────────────────────────────────────────────────────────────
     new apigatewayv2.CfnStage(this, "DefaultStage", {
       apiId: this.httpApi.ref,
@@ -281,9 +240,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // Lambda integration  (AWS_PROXY, payload format 2.0)
-    // Terraform: aws_apigatewayv2_integration.app
-    //   integration_uri = aws_lambda_function.app.invoke_arn
-    //   invoke_arn = arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{arn}/invocations
     // ─────────────────────────────────────────────────────────────────────────
     const lambdaInvokeArn = `arn:aws:apigateway:${this.region}:lambda:path/2015-03-31/functions/${this.lambdaFn.functionArn}/invocations`;
 
@@ -297,7 +253,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // Routes  –  ANY / and ANY /{proxy+}
-    // Terraform: aws_apigatewayv2_route.proxy_root + proxy_all
     // ─────────────────────────────────────────────────────────────────────────
     new apigatewayv2.CfnRoute(this, "RootRoute", {
       apiId: this.httpApi.ref,
@@ -313,9 +268,6 @@ export class DecoupleServicesStack extends cdk.Stack {
 
     // ─────────────────────────────────────────────────────────────────────────
     // Lambda resource policy  –  allow API GW to invoke
-    // Terraform: aws_lambda_permission.allow_apigw_invoke
-    //   source_arn = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
-    //   execution_arn = arn:aws:execute-api:{region}:{account}:{api-id}
     // ─────────────────────────────────────────────────────────────────────────
     const executionArn = `arn:aws:execute-api:${this.region}:${this.account}:${this.httpApi.ref}`;
 
@@ -356,8 +308,8 @@ export class DecoupleServicesStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AppSecretBootstrapCommand", {
       value: [
         `aws secretsmanager create-secret`,
-        `--name decouple-services/${this.appEnv}/app`,
-        `--secret-string '{"DATABASE_URL":"postgresql://user:pass@host:5432/db","CORS_ORIGINS":"*","LOG_LEVEL":"${isProd ? "warn" : "debug"}"}'`,
+        `--name fundares/${this.appEnv}/app`,
+        `--secret-string '{"CORS_ORIGINS":"*","LOG_LEVEL":"${isProd ? "info" : "debug"}"}'`,
       ].join(" \\\n  "),
       description: "One-time CLI command to create the secret before first CDK deploy",
     });

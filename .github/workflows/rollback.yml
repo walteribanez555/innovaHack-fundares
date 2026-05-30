@@ -16,7 +16,7 @@ permissions:
 env:
   AWS_DEFAULT_REGION: us-east-1
   NODE_VERSION: "22"
-  STACK_NAME: DecoupleServicesStack-Prod
+  STACK_NAME: FundaresStack-Prod
   ENVIRONMENT: prod
 
 # ─────────────────────────────────────────────────────────────────────────────
