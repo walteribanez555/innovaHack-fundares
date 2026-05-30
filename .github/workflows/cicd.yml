@@ -3,44 +3,28 @@ name: CI/CD
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Target environment"
-        required: false
-        default: "dev"
-        type: choice
-        options: [dev, prod]
-  workflow_call:
-    inputs:
-      environment:
-        required: true
-        type: string
-      tag_name:
-        required: false
-        type: string
-        default: ""
 
-# One deployment at a time per environment — queue, never cancel.
 concurrency:
-  group: deploy-${{ inputs.environment || (startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev') }}
+  group: deploy
   cancel-in-progress: false
 
 permissions:
-  contents: write       # create tags + GitHub Releases
+  contents: write
   pull-requests: read
 
 env:
   AWS_DEFAULT_REGION: us-east-1
   NODE_VERSION: "22"
+  ENVIRONMENT: prod
+  STACK_NAME: DecoupleServicesStack-Prod
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
-  # ─── 1. Detect changes & environment ───────────────────────────────────────
+  # ─── 1. Detect changes ──────────────────────────────────────────────────────
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -48,30 +32,10 @@ jobs:
       services:    ${{ steps.filter.outputs.services }}
       infra:       ${{ steps.filter.outputs.infra }}
       infra_drift: ${{ steps.drift.outputs.drift }}
-      environment: ${{ steps.ctx.outputs.environment }}
-      stack_name:  ${{ steps.ctx.outputs.stack_name }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Resolve environment context
-        id: ctx
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" || \
-                "${{ github.event_name }}" == "workflow_call" ]]; then
-            ENV="${{ inputs.environment }}"
-            ENV="${ENV:-dev}"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ENV="prod"
-          else
-            ENV="dev"
-          fi
-          STACK="DecoupleServicesStack-Dev"
-          [[ "$ENV" == "prod" ]] && STACK="DecoupleServicesStack-Prod"
-          echo "environment=$ENV"  >> "$GITHUB_OUTPUT"
-          echo "stack_name=$STACK" >> "$GITHUB_OUTPUT"
-          echo "Resolved: env=$ENV  stack=$STACK"
 
       - name: Path filter
         id: filter
@@ -84,7 +48,6 @@ jobs:
               - 'apps/**'
               - 'packages/**'
 
-      # Drift check requires AWS — skip on PRs (no secrets available)
       - name: Install workspace deps (drift check)
         if: github.event_name != 'pull_request'
         run: npm ci
@@ -99,14 +62,14 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
       - name: CDK drift check
         id: drift
         if: github.event_name != 'pull_request'
         run: |
           STATUS=$(aws cloudformation describe-stacks \
-            --stack-name ${{ steps.ctx.outputs.stack_name }} \
+            --stack-name ${{ env.STACK_NAME }} \
             --query 'Stacks[0].StackStatus' --output text 2>/dev/null \
             || echo "DOES_NOT_EXIST")
 
@@ -116,8 +79,8 @@ jobs:
             exit 0
           fi
 
-          DIFF=$(cd infra && npx cdk diff ${{ steps.ctx.outputs.stack_name }} \
-            -c environment=${{ steps.ctx.outputs.environment }} 2>&1 || true)
+          DIFF=$(cd infra && npx cdk diff ${{ env.STACK_NAME }} \
+            -c environment=${{ env.ENVIRONMENT }} 2>&1 || true)
 
           if echo "$DIFF" | grep -qE '\[\+\]|\[-\]|\[~\]'; then
             echo "drift=true"  >> "$GITHUB_OUTPUT"
@@ -126,11 +89,10 @@ jobs:
           fi
 
       - name: Set drift=false (PR)
-        id: drift_pr
         if: github.event_name == 'pull_request'
         run: echo "drift=false" >> "$GITHUB_OUTPUT"
 
-  # ─── 2. Validate — PRs only (required status check) ────────────────────────
+  # ─── 2. Validate — PRs only ─────────────────────────────────────────────────
   validate:
     name: validate
     runs-on: ubuntu-latest
@@ -163,19 +125,18 @@ jobs:
         run: npx tsc --noEmit
         working-directory: infra
 
-  # ─── 3. Deploy infrastructure — CDK (only when infra/ changed or drift) ────
+  # ─── 3. Deploy infrastructure ───────────────────────────────────────────────
   deploy-infra:
-    name: Deploy infra → ${{ needs.changes.outputs.environment }}
+    name: Deploy infra
     runs-on: ubuntu-latest
     needs: changes
     if: |
       github.event_name != 'pull_request' && (
         needs.changes.outputs.infra      == 'true' ||
         needs.changes.outputs.infra_drift == 'true' ||
-        github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'workflow_call'
+        github.event_name == 'workflow_dispatch'
       )
-    environment: ${{ needs.changes.outputs.environment }}
+    environment: prod
     steps:
       - uses: actions/checkout@v4
 
@@ -195,26 +156,18 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
-      # ── MUST run before CDK deploy ──────────────────────────────────────────
-      # CloudFormation resolves the secret values into Lambda environment
-      # variables at deploy time (dynamic references). If the secret doesn't
-      # exist yet (first deploy) this step creates it; otherwise it updates it.
-      # Either way, CDK always sees the real values — never placeholders.
       - name: Create or update app secret in Secrets Manager
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
           LOG_LEVEL:    ${{ secrets.LOG_LEVEL }}
         run: |
-          ENV="${{ needs.changes.outputs.environment }}"
-          SECRET_NAME="decouple-services/${ENV}/app"
+          SECRET_NAME="decouple-services/prod/app"
           SECRET_JSON=$(jq -n \
-            --arg db   "$DATABASE_URL" \
             --arg cors "$CORS_ORIGINS" \
             --arg log  "$LOG_LEVEL" \
-            '{DATABASE_URL:$db,CORS_ORIGINS:$cors,LOG_LEVEL:$log}')
+            '{CORS_ORIGINS:$cors,LOG_LEVEL:$log}')
 
           if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" &>/dev/null; then
             aws secretsmanager put-secret-value \
@@ -224,7 +177,7 @@ jobs:
           else
             aws secretsmanager create-secret \
               --name "$SECRET_NAME" \
-              --description "Runtime configuration for decouple-services Lambda ($ENV)" \
+              --description "Runtime configuration for decouple-services Lambda" \
               --secret-string "$SECRET_JSON"
             echo "✅ Secret created: $SECRET_NAME"
           fi
@@ -249,33 +202,28 @@ jobs:
             echo "✅ Shared stack exists ($STATUS)."
           fi
 
-      - name: CDK deploy ${{ needs.changes.outputs.stack_name }}
+      - name: CDK deploy
         working-directory: infra
         env:
           AWS_ACCOUNT_ID: ${{ secrets.aws_account }}
         run: |
-          npx cdk deploy ${{ needs.changes.outputs.stack_name }} \
-            -c environment=${{ needs.changes.outputs.environment }} \
+          npx cdk deploy ${{ env.STACK_NAME }} \
+            -c environment=${{ env.ENVIRONMENT }} \
             --require-approval never
 
-  # ─── 4. Deploy Lambda code — fast path (only when apps/ changed) ───────────
-  #   Runs after deploy-infra (or skips it). Never runs in parallel with it
-  #   to avoid race conditions on the same Lambda function.
+  # ─── 4. Deploy Lambda code ──────────────────────────────────────────────────
   deploy-lambda:
-    name: Deploy Lambda → ${{ needs.changes.outputs.environment }}
+    name: Deploy Lambda
     runs-on: ubuntu-latest
     needs: [changes, deploy-infra]
     if: |
       always() &&
       github.event_name != 'pull_request' && (
         needs.changes.outputs.services == 'true' ||
-        github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'workflow_call'
+        github.event_name == 'workflow_dispatch'
       ) &&
       (needs.deploy-infra.result == 'success' || needs.deploy-infra.result == 'skipped')
-    environment: ${{ needs.changes.outputs.environment }}
-    env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    environment: prod
     steps:
       - uses: actions/checkout@v4
 
@@ -291,22 +239,17 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
       - name: Lint
         run: npm run lint
         working-directory: apps/identification
 
-      - name: Build Lambda (production)
+      - name: Build Lambda
         run: npm run build:lambda:prod
         working-directory: apps/identification
 
-      - name: Run migrations
-        run: npm run migrate
-        working-directory: apps/identification
-
       - name: Package Lambda artifact
-        # esbuild outputs a self-contained bundle — zip only the bundle file
         run: cd apps/identification/dist && zip ../../../deploy.zip index.js
 
       - name: Report artifact size
@@ -317,10 +260,8 @@ jobs:
           echo "deploy.zip → ${SIZE_BYTES} bytes (${SIZE_KB} KB / ${SIZE_MB} MB)"
 
       - name: Deploy to AWS Lambda
-        env:
-          ENV: ${{ needs.changes.outputs.environment }}
         run: |
-          FUNCTION_NAME="decouple-services-${ENV}-function"
+          FUNCTION_NAME="decouple-services-prod-function"
           RETRY_COUNT=5
           RETRY_INTERVAL=10
 
@@ -342,7 +283,7 @@ jobs:
   health:
     name: Health check
     runs-on: ubuntu-latest
-    needs: [changes, deploy-infra, deploy-lambda]
+    needs: [deploy-infra, deploy-lambda]
     if: |
       always() && !cancelled() &&
       (needs.deploy-infra.result == 'success' || needs.deploy-lambda.result == 'success')
@@ -351,13 +292,13 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
       - name: Get API endpoint
         id: endpoint
         run: |
           URL=$(aws cloudformation describe-stacks \
-            --stack-name ${{ needs.changes.outputs.stack_name }} \
+            --stack-name ${{ env.STACK_NAME }} \
             --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
             --output text)
           echo "url=$URL" >> "$GITHUB_OUTPUT"
@@ -388,12 +329,12 @@ jobs:
           done
           echo "❌ Health endpoint unreachable." && exit 1
 
-  # ─── 6. Tag & GitHub Release — prod only ────────────────────────────────────
+  # ─── 6. Tag & GitHub Release ────────────────────────────────────────────────
   tag-release:
     name: Tag & Release
     runs-on: ubuntu-latest
-    needs: [changes, health]
-    if: needs.changes.outputs.environment == 'prod' && needs.health.result == 'success'
+    needs: health
+    if: needs.health.result == 'success'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -405,9 +346,6 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-          elif [[ -n "${{ inputs.tag_name }}" ]]; then
-            TAG="${{ inputs.tag_name }}"
-            git tag "$TAG" && git push origin "$TAG"
           else
             LAST=$(git tag -l 'v*' --sort=-version:refname | head -1)
             if [[ -z "$LAST" ]]; then
@@ -420,7 +358,6 @@ jobs:
             git tag "$TAG" && git push origin "$TAG"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Tag: $TAG"
 
       - name: Generate changelog
         id: changelog
@@ -444,6 +381,6 @@ jobs:
           ${{ steps.changelog.outputs.log }}
 
           ## Infrastructure
-          - Stack: \`${{ needs.changes.outputs.stack_name }}\`
+          - Stack: \`${{ env.STACK_NAME }}\`
           - Account: \`682079544132\` · Region: \`us-east-1\`
           - Commit: \`${{ github.sha }}\`"

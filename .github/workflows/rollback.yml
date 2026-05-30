@@ -1,7 +1,5 @@
-name: Production Rollback
+name: Rollback
 
-# Emergency rollback — checks out a previous release tag and redeploys via CDK.
-# The Lambda code bundled at that commit is re-uploaded; no Docker images involved.
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +16,8 @@ permissions:
 env:
   AWS_DEFAULT_REGION: us-east-1
   NODE_VERSION: "22"
+  STACK_NAME: DecoupleServicesStack-Prod
+  ENVIRONMENT: prod
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -37,9 +37,7 @@ jobs:
         id: validate
         run: |
           TAG="${{ inputs.target_version }}"
-          REASON="${{ inputs.reason }}"
 
-          # Tag must exist
           if ! git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "❌ Tag '$TAG' does not exist in this repository."
             exit 1
@@ -48,13 +46,11 @@ jobs:
           TARGET_SHA=$(git rev-parse "$TAG^{commit}")
           CURRENT_SHA=$(git rev-parse HEAD)
 
-          # Must not already be at this version
           if [[ "$TARGET_SHA" == "$CURRENT_SHA" ]]; then
             echo "❌ '$TAG' is already the current HEAD — nothing to roll back."
             exit 1
           fi
 
-          # Tag's commit must be reachable from main (ancestor check)
           if ! git merge-base --is-ancestor "$TARGET_SHA" origin/main; then
             echo "❌ '$TAG' ($TARGET_SHA) is not an ancestor of main. Aborting."
             exit 1
@@ -65,7 +61,7 @@ jobs:
 
       - name: Write job summary
         run: |
-          echo "## ⚠️ Production Rollback Initiated" >> "$GITHUB_STEP_SUMMARY"
+          echo "## ⚠️ Rollback Initiated" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| | |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
@@ -86,7 +82,6 @@ jobs:
     outputs:
       api_url: ${{ steps.endpoint.outputs.url }}
     steps:
-      # Check out the target tag — CDK will bundle the Lambda from this snapshot
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.target_version }}
@@ -104,27 +99,25 @@ jobs:
         run: npm ci
         working-directory: infra
 
-      # Redeploy with the code from the target tag
-      - name: CDK deploy (prod) from ${{ inputs.target_version }}
+      - name: CDK deploy from ${{ inputs.target_version }}
         working-directory: infra
         env:
           AWS_ACCOUNT_ID: ${{ secrets.aws_account }}
         run: |
-          npx cdk deploy DecoupleServicesStack-Prod \
-            -c environment=prod \
+          npx cdk deploy ${{ env.STACK_NAME }} \
+            -c environment=${{ env.ENVIRONMENT }} \
             --require-approval never
 
       - name: Get API endpoint
         id: endpoint
         run: |
           URL=$(aws cloudformation describe-stacks \
-            --stack-name DecoupleServicesStack-Prod \
+            --stack-name ${{ env.STACK_NAME }} \
             --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
             --output text)
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "🔄 Rollback API endpoint: $URL"
 
-      # Create an audit tag on the rollback event
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -137,7 +130,7 @@ jobs:
           git push origin "$AUDIT_TAG"
           echo "🏷️  Audit tag created: $AUDIT_TAG"
 
-  # ─── 3. Post-rollback health verification ──────────────────────────────────
+  # ─── 3. Post-rollback health check ─────────────────────────────────────────
   post-rollback-health:
     name: Post-rollback health check
     runs-on: ubuntu-latest
