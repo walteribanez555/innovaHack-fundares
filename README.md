@@ -126,3 +126,4 @@ aws secretsmanager create-secret \
 | Storage | S3 (presigned PUT, auto-deleted after verify) |
 | Infra | AWS CDK v2, API Gateway v2 (HTTP), Lambda, Secrets Manager |
 | Monorepo | Turborepo, npm workspaces |
+# innovaHack-fundares
