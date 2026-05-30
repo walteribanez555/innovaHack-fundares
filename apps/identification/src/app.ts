@@ -1,5 +1,6 @@
 /**
  * Hono app shared between Lambda (index.ts) and ECS (main.ts)
+ * v1.0.1
  */
 
 import { Hono } from 'hono';

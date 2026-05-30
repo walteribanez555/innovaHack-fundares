@@ -4,7 +4,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Fundares Recycling Platform',
-  description: 'Plataforma digital de gestión de reciclaje',
+  description: 'Plataforma digital de gestión de reciclaje · Fundares',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
