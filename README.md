@@ -1,19 +1,17 @@
-# Decouple Services — Age Verification Platform
+# Fundares — AI Extraction Service
 
-Monorepo for the age-verification platform. A Flutter mobile app captures an identity document, uploads it directly to S3, and an AWS Lambda backed by Claude Sonnet 4.5 (Bedrock) analyses it and returns a verification result.
+Monorepo for the Fundares recycling data extraction platform. A serverless Lambda backed by **Amazon Nova 2 Lite** (Bedrock) extracts structured recycling collection data from WhatsApp messages — plain text, photos, and videos sent by collectors.
 
 ---
 
 ## Repository structure
 
 ```
-decouple-services/
+fundares/
 ├── apps/
-│   ├── identification/   # Node.js 22 Lambda — REST API + Bedrock AI analysis
-│   └── mobile/           # Flutter iOS app — end-to-end capture & verification flow
+│   └── identification/   # Node.js 22 Lambda — REST API + Bedrock AI extraction
 ├── infra/                # AWS CDK (TypeScript) — all cloud resources
-├── turbo.json            # Turborepo task graph
-└── package.json          # Root workspace (npm workspaces + Turbo)
+└── package.json          # Root workspace (npm workspaces)
 ```
 
 ---
@@ -21,109 +19,98 @@ decouple-services/
 ## How it works
 
 ```
- iPhone (Flutter)
-    │
-    │ 1. POST /api/v1/identification/presign
-    │    ← { sessionId, uploadUrl }
-    │
-    │ 2. PUT <uploadUrl>  ──────────────────────────────────► S3 (private bucket)
-    │    (streams image directly — never through Lambda)
-    │
-    │ 3. POST /api/v1/identification/verify  { sessionId }
-    │                                                          Lambda
-    │                                                            ├─ reads image from S3
-    │                                                            ├─ invokes Claude Sonnet 4.5
-    │                                                            └─ deletes image from S3
-    │    ← VerificationResult { approved, details, rejectedReasons }
+Client (WhatsApp / frontend)
+  │
+  │ option A — text message
+  │  POST /api/v1/extract/text  { message }
+  │  ← ExtractionResult
+  │
+  │ option B — image or video
+  │  POST /api/v1/extract/presign  { mimeType }
+  │  ← { sessionId, uploadUrl }
+  │
+  │  PUT <uploadUrl>  ──────────────────────────────────► S3 (private bucket)
+  │  (direct upload — never through Lambda)
+  │
+  │  POST /api/v1/extract/media  { sessionId, type }
+  │                                                        Lambda
+  │                                                          ├─ reads media from S3
+  │                                                          ├─ invokes Nova 2 Lite
+  │                                                          ├─ retries with Nova Pro on low confidence
+  │                                                          └─ deletes media from S3
+  │  ← ExtractionResult { confidence, extracted, rejectedReasons }
 ```
 
 ---
 
 ## Apps
 
-| App | README | Language | Description |
-|-----|--------|----------|-------------|
-| `apps/identification` | [README](apps/identification/README.md) | TypeScript / Node 22 | Lambda REST API — presign, S3 upload, Bedrock AI verification |
-| `apps/mobile` | [README](apps/mobile/README.md) | Dart / Flutter 3.41 | iOS app — camera capture, document review, upload & result flow |
+| App | Language | Description |
+|---|---|---|
+| `apps/identification` | TypeScript / Node 22 | Lambda REST API — text extraction, presign, S3 upload, Bedrock AI analysis |
 
 ## Infrastructure
 
-| Module | README | Description |
-|--------|--------|-------------|
-| `infra` | [README](infra/README.md) | AWS CDK — API Gateway, Lambda, S3, Bedrock IAM, Secrets Manager |
+| Module | Description |
+|---|---|
+| `infra` | AWS CDK — API Gateway, Lambda, S3, Bedrock IAM, Secrets Manager |
 
 ---
 
-## Live endpoints
+## API endpoints
 
-| Environment | API Base URL |
-|-------------|-------------|
-| Dev | `https://cm981m6ag1.execute-api.us-east-1.amazonaws.com` |
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/health` | Health check |
+| `POST` | `/api/v1/extract/text` | Extract recycling data from a plain text message |
+| `POST` | `/api/v1/extract/presign` | Get a presigned S3 URL for image or video upload |
+| `POST` | `/api/v1/extract/media` | Analyse an uploaded image or video |
 
----
-
-## Workspace scripts
-
-Run from the repo root:
-
-| Command | Description |
-|---------|-------------|
-| `npm run build` | Build all apps via Turborepo |
-| `npm run dev` | Start all dev servers in parallel |
-| `npm run dev:identification` | Start only the identification service locally |
-| `npm run lint` | Lint all packages |
-| `npm run format` | Prettier format all `*.ts`, `*.tsx`, `*.md` |
-| `npm run check-types` | TypeScript type-check all packages |
+Full request/response reference → [`infra/README.md`](infra/README.md)  
+Frontend integration examples → [`docs/(en)/project/apps/indentification/frontend-integration.md`](docs/(en)/project/apps/indentification/frontend-integration.md)
 
 ---
 
-## Cloud resources (dev)
+## Cloud resources (prod)
 
 | Resource | Name |
-|----------|------|
-| Lambda function | `decouple-services-dev-function` |
-| API Gateway (HTTP) | `decouple-services-dev` |
-| S3 bucket | `decouple-services-dev-verification` |
-| Secrets Manager | `decouple-services/dev/app` |
-| CloudWatch (Lambda) | `/aws/lambda/decouple-services-dev-function` |
-| CloudWatch (API GW) | `/aws/api_gw/decouple-services-dev-api` |
-| IAM role | `decouple-services-dev-lambda-exec-role` |
+|---|---|
+| Lambda function | `fundares-prod-function` |
+| API Gateway (HTTP) | `fundares-prod` |
+| S3 bucket | `fundares-prod-collections` |
+| Secrets Manager | `fundares/prod/app` |
+| CloudWatch (Lambda) | `/aws/lambda/fundares-prod-function` |
+| CloudWatch (API GW) | `/aws/api_gw/fundares-prod-api` |
+| IAM role | `fundares-prod-lambda-exec-role` |
 
 ---
 
 ## Deploy
 
 ```bash
-cd infra
+# 1. Bootstrap CDK (once per account/region)
+npx cdk bootstrap aws://YOUR_ACCOUNT_ID/us-east-1
 
-# Dev
-npx cdk deploy DecoupleServicesStack-Dev
-
-# Prod
-npx cdk deploy DecoupleServicesStack-Prod -c environment=prod
-
-# Both stacks
-npx cdk deploy --all
-```
-
-Requires `AWS_ACCOUNT_ID` or active AWS credentials. Secrets must be pre-populated in Secrets Manager before deploying:
-
-```bash
+# 2. Create the secret (once, before first deploy)
 aws secretsmanager create-secret \
-  --name decouple-services/dev/app \
-  --secret-string '{"DATABASE_URL":"...","CORS_ORIGINS":"*","LOG_LEVEL":"debug"}'
+  --name fundares/prod/app \
+  --secret-string '{"CORS_ORIGINS":"*","LOG_LEVEL":"info"}'
+
+# 3. Deploy
+cd infra
+npx cdk deploy FundaresStack-Prod -c environment=prod
 ```
+
+CI/CD deploys automatically on every push to `main`.
 
 ---
 
-## Tech stack at a glance
+## Tech stack
 
 | Layer | Technology |
-|-------|-----------|
-| Mobile | Flutter 3.41, Dart 3.11, BLoC/Cubit, GoRouter, Dio |
+|---|---|
 | API | Hono, Node.js 22, TypeScript, esbuild |
-| AI | AWS Bedrock — Claude Sonnet 4.5 (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) |
-| Storage | S3 (presigned PUT, auto-deleted after verify) |
+| AI (primary) | AWS Bedrock — Amazon Nova 2 Lite (`global.amazon.nova-2-lite-v1:0`) |
+| AI (fallback) | AWS Bedrock — Amazon Nova Pro (`amazon.nova-pro-v1:0`) |
+| Storage | S3 — presigned PUT, auto-deleted after extraction |
 | Infra | AWS CDK v2, API Gateway v2 (HTTP), Lambda, Secrets Manager |
-| Monorepo | Turborepo, npm workspaces |
-# innovaHack-fundares
